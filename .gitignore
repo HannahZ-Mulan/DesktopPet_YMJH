@@ -12,5 +12,8 @@ dist/
 crash.log
 *.log
 
+# 运行时状态文件（位置/血量/心情/开关等，每台机器不同）
+config.json
+
 # ZCode 会话/缓存
 .zcode/

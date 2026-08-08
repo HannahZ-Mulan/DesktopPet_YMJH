@@ -746,12 +746,12 @@ class BubbleLabel(QWidget):
         self.show_text(random.choice(texts), duration)
 
     def show_smart(self, text):
-        """按字数自动算显示时长：每字约 160ms（≈6字/秒，舒适阅读），下限 2.5s，上限 16s。
+        """按字数自动算显示时长：每字约 200ms（≈5字/秒，从容阅读），下限 2.5s，上限 16s。
 
         长文案（如江湖语料上百字）给足时间读完，短文案不过快消失。
         """
         n = len(text)
-        duration = min(16000, max(2500, int(n * 160)))
+        duration = min(16000, max(2500, int(n * 200)))
         self.show_text(text, duration)
 
     def show_random_smart(self, texts):
@@ -2383,10 +2383,10 @@ class PetWindow(QWidget):
         if self._state not in (S_SLEEP, S_DRAG, S_FLY, S_PEEK, S_FAINT) and \
            not self._quiet_mode and now - self._last_low_warn > 300:
             if self._hp < 25:
-                self.bubble.show_random(LOW_HP_TEXTS, 2400)
+                self.bubble.show_random_smart(LOW_HP_TEXTS)
                 self._last_low_warn = now
             elif self._mp < 25:
-                self.bubble.show_random(LOW_MP_TEXTS, 2400)
+                self.bubble.show_random_smart(LOW_MP_TEXTS)
                 self._last_low_warn = now
 
         # —— 情感衰减/增长 ——
@@ -2529,8 +2529,8 @@ class PetWindow(QWidget):
         if self._inventory.get(item_id, 0) <= 0:
             item = ITEMS.get(item_id, {})
             name = item.get("name", item_id)
-            self.bubble.show_text(
-                random.choice(NO_ITEM_TEXTS).replace("{item}", name), 2200
+            self.bubble.show_smart(
+                random.choice(NO_ITEM_TEXTS).replace("{item}", name)
             )
             return
         item = ITEMS[item_id]
@@ -2573,7 +2573,7 @@ class PetWindow(QWidget):
             txt = random.choice(reason_texts)
             for k, v in fmt.items():
                 txt = txt.replace("{" + k + "}", str(v))
-            self.bubble.show_text(txt, 2600)
+            self.bubble.show_smart(txt)
         self._play(ANIM_POP)
         self._save_config()
 
@@ -2589,7 +2589,7 @@ class PetWindow(QWidget):
             txt = random.choice(reason_texts)
             for k, v in fmt.items():
                 txt = txt.replace("{" + k + "}", str(v))
-            self.bubble.show_text(txt, 2600)
+            self.bubble.show_smart(txt)
         self._play(ANIM_POP)
         self._save_config()
 
@@ -2608,7 +2608,7 @@ class PetWindow(QWidget):
             if self._focus_window and not silent and not self._quiet_mode:
                 if self._cool_ok("distract", 300):   # 5 分钟冷却，避免频繁打扰
                     texts = DISTRACT_IDLE_TEXTS if idle > 30 else DISTRACT_SWITCH_TEXTS
-                    self.bubble.show_random(texts, 2600)
+                    self.bubble.show_random_smart(texts)
             self._focus_window = title
             self._focus_start = now
             self._focus_rewarded_min = 0
@@ -2659,7 +2659,7 @@ class PetWindow(QWidget):
         self._pomodoro_end = 0.0
         self._update_task_banner()   # 立即刷新横幅（移除番茄计时段）
         if not self._quiet_mode:
-            self.bubble.show_random(POMODORO_CANCEL_TEXTS, 2200)
+            self.bubble.show_random_smart(POMODORO_CANCEL_TEXTS)
 
     def _set_pomodoro_duration(self):
         """设置自定义番茄时长（1-120 分钟）。
@@ -2695,7 +2695,7 @@ class PetWindow(QWidget):
         if idle_seconds() > 120:
             self._pomodoro_active = False
             if not self._quiet_mode:
-                self.bubble.show_random(POMODORO_BREAK_TEXTS, 2400)
+                self.bubble.show_random_smart(POMODORO_BREAK_TEXTS)
             return
         # 完成：按时长决定奖励类型（≤25分钟→神授丹，>25分钟→一滴醉）
         if remaining <= 0:
@@ -2837,7 +2837,7 @@ class PetWindow(QWidget):
         for keys, texts, topic in rules:
             if any(k in t for k in keys):
                 if self._cool_ok(topic, 600):
-                    self.bubble.show_random(texts, 2400)
+                    self.bubble.show_random_smart(texts)
                 return
 
     def _react_to_time(self):
@@ -2853,7 +2853,7 @@ class PetWindow(QWidget):
                 self.bubble.show_random(NIGHT_TEXTS, 2600)
         # 整点久坐提醒
         elif now.minute == 0 and self._cool_ok("break", 3600):
-            self.bubble.show_random(BREAK_TEXTS, 2400)
+            self.bubble.show_random_smart(BREAK_TEXTS)
 
     def _cool_ok(self, topic, cooldown_s):
         """该主题是否冷却完毕可触发。"""
