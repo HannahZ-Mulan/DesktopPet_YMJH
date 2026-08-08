@@ -1,0 +1,16 @@
+# Python 编译缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller 打包产物
+build/
+dist/
+*.spec.bak
+
+# 运行时日志
+crash.log
+*.log
+
+# ZCode 会话/缓存
+.zcode/

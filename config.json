@@ -1,0 +1,33 @@
+{
+  "scale": 0.30277300717946976,
+  "on_top": true,
+  "quiet": true,
+  "first_run": false,
+  "idle_peek": 0,
+  "pet_name": "糊糊",
+  "master": "少侠",
+  "skin": "一滴醉",
+  "stand_mode": true,
+  "pomodoro_min": 25,
+  "current_task": "",
+  "show_task_banner": true,
+  "health": {
+    "sit_interval": 0,
+    "drink_interval": 0,
+    "pre_alert": 60,
+    "health_anim": "pop"
+  },
+  "pos": [
+    1367,
+    836
+  ],
+  "pet_state": {
+    "hp": 37.9,
+    "mp": 97.3,
+    "mood": 100.0,
+    "inventory": {
+      "shenshou_dan": 3,
+      "yidizui": 2
+    }
+  }
+}
