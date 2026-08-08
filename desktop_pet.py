@@ -1985,6 +1985,18 @@ class PetWindow(QWidget):
         """记录一次与宠物的互动（点击/拖动/双击/喂食），重置躲猫猫计时。"""
         self._last_pet_interact = time.perf_counter()
 
+    def _show_click_line(self):
+        """点击交互台词：普通/江湖语料库随机二选一。
+
+        - 50% 普通短句（INTERACT_TEXTS，固定 2s）
+        - 50% 江湖长文案（JIANGHU_TEXTS，按字数智能调时长 2.5s-16s）
+        安静模式下点击照常显示（视为主动交互）。
+        """
+        if random.random() < 0.5:
+            self.bubble.show_random(INTERACT_TEXTS, 2000)
+        else:
+            self.bubble.show_random_smart(JIANGHU_TEXTS)
+
     def interact(self):
         """点击互动：轮流播放瞬时动画 + 气泡。"""
         self._mark_pet_interact()
@@ -2015,12 +2027,8 @@ class PetWindow(QWidget):
         if random.random() < 0.3:
             self._boost_emotion("excited", 12)
         self._mood = min(100.0, self._mood + 3)
-        # 台词受主导情感影响
-        dom = self.dominant_emotion()
-        if self._emotions[dom] > 50 and random.random() < 0.6:
-            self.bubble.show_random(EMOTION_TEXTS[dom], 2000)
-        else:
-            self.bubble.show_random(INTERACT_TEXTS, 2000)
+        # 点击台词：普通/江湖语料库随机二选一（绕过情感分支）
+        self._show_click_line()
 
     def _wake_up(self):
         self._was_sleeping = False
@@ -2263,7 +2271,7 @@ class PetWindow(QWidget):
         # 双击玩耍：加心情值（每次 +8，封顶 100）
         self._mood = min(100.0, self._mood + 8)
         self._boost_emotion("happy", 6)
-        self.bubble.show_random(INTERACT_TEXTS, 2000)
+        self._show_click_line()
 
     def wheelEvent(self, e):
         delta = e.angleDelta().y()
