@@ -16,6 +16,7 @@ build.py — 桌宠一键打包脚本
   2. python build.py
 """
 
+import json
 import os
 import re
 import subprocess
@@ -26,6 +27,7 @@ ICON_SOURCE = os.path.join(ROOT, "assets", "source_icon.png")
 ICON_OUTPUT = os.path.join(ROOT, "assets", "app.ico")
 VERSION_FILE = os.path.join(ROOT, "version_info.txt")
 ENTRY = os.path.join(ROOT, "desktop_pet.py")
+VERSION_JSON = os.path.join(ROOT, "version.json")
 APP_NAME = "糊宠"               # EXE 文件名
 APP_TITLE = "糊宠"              # 显示名（属性面板里的"产品名"）
 COMPANY = "红烧茄子"
@@ -48,6 +50,102 @@ def _read_app_version() -> str:
                 return m.group(1)
     print("[警告] 未在 desktop_pet.py 找到 APP_VERSION，默认用 1.0.0")
     return "1.0.0"
+
+
+# ---------------------------------------------------------------------------
+# E1：版本号一致性预检（打包前阻断"三处不一致"）
+# 三处 = desktop_pet.APP_VERSION / version.json.version / download_url(s) 的 tag。
+# git tag 是 Should（不可用就 warn，不 fail）。
+# 任一硬断言不过 → sys.exit(1)，阻断打包。
+# ---------------------------------------------------------------------------
+_TAG_RE = re.compile(r"/releases/download/(v?[\d.]+)/", re.IGNORECASE)
+
+
+def _extract_release_tag(url: str):
+    """从 GitHub Release URL 提取 tag 段，如 /releases/download/v1.1.0/... → v1.1.0
+    无匹配返回 None。"""
+    if not url:
+        return None
+    m = _TAG_RE.search(url)
+    return m.group(1) if m else None
+
+
+def _assert_version_consistent(app_version: str):
+    """打包前预检：APP_VERSION 与 version.json / download_url(s) tag 必须一致。
+    git tag 不可用时仅 warn。任一硬断言不过 sys.exit(1)。
+    """
+    print("\n========== [预检] 版本号一致性 ==========")
+    errors = []
+
+    # 1) 读 version.json
+    try:
+        with open(VERSION_JSON, "r", encoding="utf-8") as f:
+            vj = json.load(f)
+    except Exception as e:
+        print(f"[失败] 无法读取 version.json：{e}")
+        sys.exit(1)
+
+    # 2) APP_VERSION == version.json.version
+    json_ver = vj.get("version", "")
+    if json_ver != app_version:
+        errors.append(
+            f"  · APP_VERSION({app_version}) != version.json.version({json_ver})"
+        )
+
+    # 3) download_url / download_urls 的 GitHub Release tag == APP_VERSION
+    #    兼容两种 tag 写法：v1.1.0 或 1.1.0（统一比较数字部分）
+    expected_num = app_version
+    expected_tag_variants = {app_version, f"v{app_version}"}
+    urls_to_check = []
+    if vj.get("download_urls"):
+        urls_to_check.extend(vj["download_urls"])
+    if vj.get("download_url"):
+        urls_to_check.append(vj["download_url"])
+    # 仅校验 GitHub Release URL（加速镜像也含 /releases/download/vX.Y.Z/ 路径，会被同一条正则捕获）
+    checked_url_count = 0
+    for url in urls_to_check:
+        if "releases/download" not in url:
+            continue
+        checked_url_count += 1
+        tag = _extract_release_tag(url)
+        if tag is None or tag.lstrip("v") != expected_num:
+            errors.append(
+                f"  · download_url tag({tag}) 与 APP_VERSION({app_version}) 不一致：{url}"
+            )
+    if checked_url_count == 0:
+        # 没有任何 GitHub Release URL 也是问题（无权威源）
+        errors.append("  · version.json 中没有任何 GitHub Release /releases/download/ URL")
+
+    # 4) git tag（Should，不可用 warn 不 fail）
+    try:
+        res = subprocess.run(
+            ["git", "describe", "--tags", "--abbrev=0"],
+            cwd=ROOT, capture_output=True, text=True, timeout=10,
+        )
+        if res.returncode == 0:
+            git_tag = res.stdout.strip()
+            if git_tag.lstrip("v") != expected_num:
+                errors.append(
+                    f"  · git describe --tags 最近 tag({git_tag}) 与 APP_VERSION({app_version}) 不一致"
+                )
+        # git 不可用 / 无 tag：不 fail（开发者环境可能没打 tag）
+    except FileNotFoundError:
+        print("[警告] 未找到 git，跳过 git tag 校验（不阻断）")
+    except Exception as e:
+        print(f"[警告] git tag 校验失败：{e}（不阻断）")
+
+    # 结论
+    if errors:
+        print("[失败] 版本号不一致，已阻断打包：")
+        for e in errors:
+            print(e)
+        print("\n修复提示：")
+        print("  1) 改 desktop_pet.py 的 APP_VERSION")
+        print("  2) 改 version.json 的 version + download_url(s) 的 tag")
+        print("  3) 打标签：git tag vX.Y.Z")
+        sys.exit(1)
+    print(f"[OK] 版本号一致：{app_version}"
+          + (f"（已校验 {checked_url_count} 个 Release URL）" if checked_url_count else ""))
 
 
 def _version_tuple(ver: str):
@@ -151,9 +249,13 @@ def run_pyinstaller(version: str):
 def main():
     version = _read_app_version()
     print(f"准备打包 {APP_TITLE} v{version}")
+    # E1：打包前先做版本号一致性预检（APP_VERSION / version.json / Release tag / git tag）
+    _assert_version_consistent(version)
     gen_icon()
     gen_version_info(version)
     run_pyinstaller(version)
+    # E6：发布流程提示（publish.py 是独立工具，由作者手动决定何时跑）
+    print("\n下一步：python publish.py  生成 version.json.draft 并打印发布清单")
 
 
 if __name__ == "__main__":

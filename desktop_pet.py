@@ -34,6 +34,7 @@ except Exception:
         pass
 import urllib.request
 import urllib.error
+import urllib.parse
 import ssl
 import subprocess
 import tempfile
@@ -3512,20 +3513,164 @@ def _parse_version(v):
         return (0, 0, 0)
 
 
-def _fetch_json(url, timeout=12):
-    """下载并解析 JSON。失败返回 None。"""
+# ---------------------------------------------------------------------------
+# 更新流程日志（E3 基座）
+# 与 crash.log 同目录（app_dir()/update.log），便于用户一键打包发作者。
+#   格式：[YYYY-MM-DD HH:MM:SS] [STAGE] STATUS detail
+#   STAGE 取值：CHECK / DOWNLOAD / VERIFY / INSTALL / SSL
+# 任何失败绝不抛——日志函数失败不能反过来搞挂更新流程。
+# ---------------------------------------------------------------------------
+UPDATE_LOG_MAX_BYTES = 1 * 1024 * 1024   # 单文件上限 1MB（TR7：防膨胀）
+UPDATE_LOG_PATH = None                    # 延迟初始化（避免 app_dir 提前求值）
+
+
+def _update_log_path() -> str:
+    """update.log 路径（app_dir()/update.log）。延迟求值，供打包后正确指向 EXE 目录。"""
+    global UPDATE_LOG_PATH
+    if UPDATE_LOG_PATH is None:
+        UPDATE_LOG_PATH = os.path.join(app_dir(), "update.log")
+    return UPDATE_LOG_PATH
+
+
+def _log_update(stage, status, detail=""):
+    """向 update.log 追加一行。
+    stage  : CHECK / DOWNLOAD / VERIFY / INSTALL / SSL（阶段标识）
+    status : OK / FAIL / WARN / START / INFO
+    detail : 任意字符串（不含敏感信息，只含 URL / 版本号 / 异常类型）
+
+    日志体积超过 UPDATE_LOG_MAX_BYTES 时滚动（清空重来），缓解 TR7。
+    """
     try:
+        path = _update_log_path()
+        # 滚动：超过上限先清空（简单策略，几十人规模足够）
+        try:
+            if os.path.isfile(path) and os.path.getsize(path) > UPDATE_LOG_MAX_BYTES:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] "
+                            f"[LOG] INFO update.log rotated (size > {UPDATE_LOG_MAX_BYTES} bytes)\n")
+        except Exception:
+            pass
+        line = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] [{stage}] {status}"
+        if detail:
+            line += f" {detail}"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        # 日志写入失败必须吞掉，不能反过来搞挂更新主链路
+        pass
+
+
+# ---------------------------------------------------------------------------
+# SSL 白名单（E5 基座）
+# 策略：权威域名严格校验，加速镜像维持现状宽松（兼容镜像证书可能不规范）。
+#   - 白名单内：check_hostname=True + CERT_REQUIRED（证书不过即拒）
+#   - 非白名单：宽松（保留现状行为），但写一条 [SSL] WARN 到 update.log
+# 详见 Architect Plan E5 + 第 6 节 Trade-off 5。
+# ---------------------------------------------------------------------------
+_TRUSTED_SSL_HOSTS = (
+    "github.com",
+    "objects.githubusercontent.com",
+    "raw.githubusercontent.com",
+    "cdn.jsdelivr.net",
+    "fastly.jsdelivr.net",
+    # *.githubusercontent.com 用后缀匹配
+)
+_TRUSTED_SSL_SUFFIX = (
+    ".githubusercontent.com",
+)
+
+
+def _is_trusted_host(host: str) -> bool:
+    """判断 host 是否在 SSL 严格校验白名单内。"""
+    if not host:
+        return False
+    h = host.lower()
+    if h in _TRUSTED_SSL_HOSTS:
+        return True
+    for suf in _TRUSTED_SSL_SUFFIX:
+        if h.endswith(suf):
+            return True
+    return False
+
+
+def _make_ssl_context(host: str):
+    """根据 host 返回对应的 SSLContext：
+    - 白名单内 host → 严格 SSLContext（CERT_REQUIRED + check_hostname）
+    - 非白名单（如加速镜像）→ 宽松 SSLContext（兼容现状），并写 [SSL] WARN 日志
+    任何异常都回退到宽松上下文，保证 fallback 链不被 SSL 拖垮（TR8）。
+    """
+    try:
+        if _is_trusted_host(host):
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
+            return ctx
+        # 非白名单：维持现状（宽松），但留下观测痕迹
+        _log_update("SSL", "WARN",
+                    f"host={host or '(unknown)'} cert_check=relaxed (not in trusted list)")
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE          # 部分用户系统证书过期，放宽校验
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    except Exception as e:
+        # 构造失败兜底：宽松上下文（不让 SSL 拖垮下载主链路）
+        _log_update("SSL", "WARN",
+                    f"ssl_context build error type={type(e).__name__} msg={e} → fallback relaxed")
+        ctx = ssl.create_default_context()
+        try:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        except Exception:
+            pass
+        return ctx
+
+
+def _encode_url(url):
+    """对 URL 的 path 段做 percent-encoding，规避含非 ASCII 字符的 URL
+    （如 .../糊宠.exe）传给 urllib.request.urlopen 触发 UnicodeEncodeError。
+
+    只编码 path 段；scheme/host/query 保持原样。safe="/%" 保留路径分隔符
+    和已编码字符，避免双重编码。任何异常都原样返回（编码失败不应让主链路崩）。
+    """
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        encoded_path = urllib.parse.quote(parsed.path, safe="/%")
+        return urllib.parse.urlunsplit(parsed._replace(path=encoded_path))
+    except Exception:
+        return url
+
+
+def _fetch_json(url, timeout=12):
+    """下载并解析 JSON。失败返回 None。
+    SSL：用 _make_ssl_context(url host) 替代硬编码宽松（E5 接入）。
+    日志：写 [CHECK] FAIL/OK（E3 接入）。
+    PM 约束 2：检测链路的 CDN→raw fallback 由调用方（CheckUpdateThread）控制，
+              本函数只负责"单次请求"，不感知 fallback。
+    """
+    try:
+        # E5：按 host 决定严格/宽松（白名单 GitHub/jsDelivr 走严格）
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = (parsed.hostname or "").lower()
+        except Exception:
+            host = ""
+        ctx = _make_ssl_context(host)
+        url = _encode_url(url)
         req = urllib.request.Request(url, headers={
             "User-Agent": "HuChong-Updater/" + APP_VERSION,
             "Cache-Control": "no-cache",
         })
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             data = r.read().decode("utf-8")
-        return json.loads(data)
-    except Exception:
+        result = json.loads(data)
+        # E3：成功也留痕（含远端版本号，便于排查"为啥网友收不到更新"）
+        _log_update("CHECK", "OK",
+                    f"url={url} remote={result.get('version', '?')}")
+        return result
+    except Exception as e:
+        # E3：失败写日志（异常类型+消息），不再静默吞
+        _log_update("CHECK", "FAIL",
+                    f"url={url} type={type(e).__name__} msg={e}")
         return None
 
 
@@ -3562,6 +3707,9 @@ class Updater:
 
     def _on_checked(self, info):
         if not info:
+            # E3：检测失败在 _fetch_json 里已写 [CHECK] FAIL，此处补 INFO（无远端结果）
+            _log_update("CHECK", "INFO",
+                        f"local={APP_VERSION} result=empty silent={self._silent}")
             if not self._silent:
                 QMessageBox.warning(
                     self.parent, "检查更新",
@@ -3570,7 +3718,11 @@ class Updater:
                 )
             return
         remote_ver = info.get("version", "0")
-        if _parse_version(remote_ver) > _parse_version(APP_VERSION):
+        has_new = _parse_version(remote_ver) > _parse_version(APP_VERSION)
+        # E3：写一条 CHECK 结果摘要（local/remote/has_new）
+        _log_update("CHECK", "INFO",
+                    f"local={APP_VERSION} remote={remote_ver} has_new={has_new}")
+        if has_new:
             self._prompt_update(info)
         else:
             if not self._silent:
@@ -3583,7 +3735,11 @@ class Updater:
         remote_ver = info.get("version", "?")
         date = info.get("update_date", "")
         changelog = info.get("changelog", "")
-        url = info.get("download_url", "")
+        # E4：URL 列表规范化（数据驱动）。优先读 download_urls；缺失回退 download_url。
+        #   PM 约束 3：列表第 0 项应保持 GitHub 权威源；本处只按数据呈现，不重排。
+        urls = self._normalize_urls(info)
+        # "打开下载页" 统一指向列表第 0 项（GitHub Release 页）作为人肉兜底
+        page_url = urls[0] if urls else ""
         msg = QMessageBox(self.parent)
         msg.setWindowTitle("发现新版本")
         msg.setIcon(QMessageBox.Information)
@@ -3597,15 +3753,37 @@ class Updater:
         )
         yes = msg.addButton("🔄 立即更新", QMessageBox.AcceptRole)
         no = msg.addButton("稍后再说", QMessageBox.RejectRole)
-        if url:
+        if page_url:
             open_page = msg.addButton("🌐 打开下载页", QMessageBox.ActionRole)
         msg.setDefaultButton(yes)
         msg.exec_()
         clicked = msg.clickedButton()
         if clicked is yes:
-            self._download_and_replace(url, remote_ver)
-        elif url and clicked is open_page:
-            self._open_url(url)
+            self._download_and_replace(urls, remote_ver, info)
+        elif page_url and clicked is open_page:
+            self._open_url(page_url)
+
+    @staticmethod
+    def _normalize_urls(info):
+        """E4：把 version.json 的下载字段规范化成有序 URL 列表。
+        - 有 download_urls → 直接用（顺序即优先级，第 0 项是 GitHub 权威源）
+        - 否则若有 download_url → 包成单元素列表
+        - 都没有 → 返回空列表（上层会提示"未提供下载地址"）
+        去重保序，过滤空串。
+        """
+        urls = []
+        seen = set()
+        raw = info.get("download_urls")
+        if isinstance(raw, list):
+            for u in raw:
+                if isinstance(u, str) and u and u not in seen:
+                    seen.add(u)
+                    urls.append(u)
+        if not urls:
+            single = info.get("download_url")
+            if isinstance(single, str) and single:
+                urls.append(single)
+        return urls
 
     @staticmethod
     def _open_url(url):
@@ -3617,13 +3795,16 @@ class Updater:
             except Exception:
                 pass
 
-    def _download_and_replace(self, url, new_ver):
-        if not url:
+    def _download_and_replace(self, urls, new_ver, info):
+        """E4：传入 URL 列表 + version.json info。
+        info 用于取 sha256（E2）。空列表直接告警返回。
+        """
+        if not urls:
             QMessageBox.warning(self.parent, "更新", "❌ 该版本未提供下载地址。")
             return
         # 进度对话框
         prog = QProgressDialog(
-            f"正在下载新版本 v{new_ver} ...\n（约 85MB，请耐心等待）",
+            f"正在下载新版本 v{new_ver} ...\n（约 85MB，请耐心等待；多源自动 fallback）",
             "取消", 0, 100, self.parent
         )
         prog.setWindowTitle("更新中")
@@ -3633,25 +3814,41 @@ class Updater:
         prog.setValue(0)
 
         # 在独立线程下载，避免冻结 UI
-        dl = _DownloadThread(url, prog)
+        # E2：把 sha256（可能为 None）传给下载线程，下载完做完整性校验
+        dl = _DownloadThread(urls, prog, expected_sha256=info.get("sha256"))
         dl.progress_signal.connect(prog.setValue)
         prog.canceled.connect(dl.terminate_download)
         dl.done_signal.connect(
-            lambda ok, path: self._on_download_done(ok, path, prog, new_ver)
+            lambda ok, path_or_errcode: self._on_download_done(
+                ok, path_or_errcode, prog, new_ver
+            )
         )
         dl.start()
         self._dl_thread = dl     # 防止被回收
 
-    def _on_download_done(self, ok, path, prog, new_ver):
+    def _on_download_done(self, ok, payload, prog, new_ver):
+        """E2/E3：根据 ok 与 payload（成功=文件路径，失败=错误码）走分支。
+        E3：[VERIFY] / [INSTALL] 写入 update.log。
+        T11：按错误码给"人话提示"。
+        """
         prog.close()
-        if not ok or not path:
+        if not ok:
+            # payload 是错误码字符串
+            err_code = payload or "network"
+            _log_update("VERIFY", "FAIL", f"code={err_code} ver={new_ver}")
+            QMessageBox.warning(self.parent, "更新失败",
+                                self._humanize_download_error(err_code))
+            return
+        path = payload
+        if not path:
+            _log_update("VERIFY", "FAIL", "code=no_payload ver=" + str(new_ver))
             QMessageBox.warning(
                 self.parent, "更新失败",
-                "❌ 下载失败，可能是网络问题或被拦截。\n"
-                "建议：\n1. 检查网络/关闭代理后重试\n"
-                "2. 到发布页用浏览器手动下载"
+                "❌ 下载失败，请稍后重试，或到发布页手动下载。"
             )
             return
+        # E3：[VERIFY] OK（校验在 _DownloadThread 内完成，能到这一步说明 SHA256 通过或缺失跳过）
+        _log_update("VERIFY", "OK", f"ver={new_ver} path={path}")
         # 下载成功 → 替换 exe 并重启
         ret = QMessageBox.question(
             self.parent, "更新就绪",
@@ -3660,7 +3857,29 @@ class Updater:
         )
         if ret != QMessageBox.Yes:
             return
+        # E3：[INSTALL] START（实际替换在批处理里完成，这里只标记起点）
+        _log_update("INSTALL", "START", f"ver={new_ver} pid={os.getpid()}")
         self._install_and_restart(path)
+
+    @staticmethod
+    def _humanize_download_error(err_code):
+        """T11：把内部错误码翻译成人话提示。覆盖三种典型错误码。"""
+        if err_code == "sha256_mismatch":
+            return (
+                "❌ 下载完成，但文件校验未通过（可能被篡改或下载不完整）。\n"
+                "已自动中止安装。建议：\n"
+                "1. 稍后重试（可能是网络丢包）\n"
+                "2. 到 GitHub Release 页用浏览器手动下载\n"
+                "3. 若反复出现，请联系作者"
+            )
+        if err_code == "canceled":
+            return "ℹ️ 已取消下载。"
+        # network / 其他未知错误码统一走"网络问题"
+        return (
+            "❌ 下载失败，可能是网络问题或被拦截。\n"
+            "建议：\n1. 检查网络/关闭代理后重试\n"
+            "2. 到发布页用浏览器手动下载"
+        )
 
     def _install_and_restart(self, new_exe_path):
         """用批处理替换正在运行的 exe 并重启。"""
@@ -3711,50 +3930,206 @@ class Updater:
         QApplication.quit()
 
 
+# P1-1：下载错误码严重性表（高 → 低）。
+# 用于 _DownloadThread.run 多源 fallback：仅当新错误码严重性 ≥ 已有时才覆盖 last_error，
+# 避免高严重性错误（如 sha256_mismatch）被后续低严重性错误（如 network）掩盖。
+# verify_error:* 带前缀，比较时取 ":" 之前的基础码。
+_ERROR_SEVERITY = {
+    "sha256_mismatch": 3,
+    "verify_error": 2,
+    "network": 1,
+    "canceled": 0,
+}
+
+
+def _more_severe(new_code, current_code):
+    """判断 new_code 严重性是否 >= current_code（即允许覆盖）。
+
+    带前缀的错误码（如 verify_error:OSError）用 split(':')[0] 取基础码。
+    未知 / 空错误码默认严重性 0（最低，不会覆盖任何已有错误码）。
+    """
+    def _sev(code):
+        if not code:
+            return 0
+        base = code.split(":", 1)[0]
+        return _ERROR_SEVERITY.get(base, 0)
+    return _sev(new_code) >= _sev(current_code)
+
+
 class _DownloadThread(QThread):
-    """带进度的下载线程。"""
+    """带进度的下载线程（E2/E3/E4/E5 加固版）。
+
+    设计要点（按 Architect Plan）：
+      · E4 多源 fallback：构造函数接收 urls 列表，run() 串行尝试，任一成功即停止；
+        全部失败才 emit(False, "network")。
+      · E2 SHA256：下载完成后算哈希，与 expected_sha256 比对。缺失→跳过+warn；
+        匹配→emit(True)；不匹配→删临时文件+emit(False, "sha256_mismatch")，绝不安装。
+      · E5 SSL：每个 URL 用 _make_ssl_context(host) 按 host 决定严格/宽松。
+      · E3 日志：每次尝试的成败都写 [DOWNLOAD] 到 update.log；取消写一条 INFO。
+      · 错误码：done_signal 第 2 参数在失败时是有意义的错误码（network/sha256_mismatch/canceled）。
+
+    注意：每个 URL 用独立 try/except，单个失败不中断 fallback 链。
+    """
     progress_signal = pyqtSignal(int)
+    # 成功时：(True, 文件路径)；失败时：(False, 错误码字符串)
     done_signal = pyqtSignal(bool, str)
 
-    def __init__(self, url, prog_dialog):
+    def __init__(self, urls, prog_dialog, expected_sha256=None):
         super().__init__()
-        self.url = url
+        # E4：规范化 URL 列表（防御性：也接受单个 str，兼容历史调用方）
+        if isinstance(urls, str):
+            urls = [urls] if urls else []
+        self.urls = [u for u in (urls or []) if isinstance(u, str) and u]
         self.prog = prog_dialog
+        self.expected_sha256 = expected_sha256 or None
         self._cancel = False
 
     def terminate_download(self):
         self._cancel = True
 
     def run(self):
-        try:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            req = urllib.request.Request(self.url, headers={
-                "User-Agent": "HuChong-Updater",
-            })
-            with urllib.request.urlopen(req, timeout=60, context=ctx) as r:
-                total = int(r.headers.get("Content-Length", 0))
-                tmp = os.path.join(tempfile.gettempdir(), "huchong_new.exe")
-                downloaded = 0
-                chunk = 64 * 1024
-                with open(tmp, "wb") as f:
-                    while True:
-                        if self._cancel:
-                            self.done_signal.emit(False, "")
-                            return
-                        data = r.read(chunk)
-                        if not data:
-                            break
-                        f.write(data)
-                        downloaded += len(data)
-                        if total > 0:
-                            pct = min(99, int(downloaded * 100 / total))
-                            self.progress_signal.emit(pct)
+        # 防御：URL 列表为空，直接告警（理论上 Updater 已过滤，但下载线程不依赖调用方契约）
+        if not self.urls:
+            _log_update("DOWNLOAD", "FAIL", "no urls provided")
+            self.done_signal.emit(False, "network")
+            return
+
+        tmp = os.path.join(tempfile.gettempdir(), "huchong_new.exe")
+        # TR4 缓解：首源 60s（现状），fallback 阶段缩短到 30s，避免一个挂了的镜像拖太久
+        first_timeout = 60
+        fallback_timeout = 30
+
+        last_error = "network"
+        for idx, url in enumerate(self.urls):
+            if self._cancel:
+                # E3：取消单独写一条，避免和"失败"混淆
+                _log_update("DOWNLOAD", "INFO", "canceled by user")
+                self.done_signal.emit(False, "canceled")
+                return
+
+            timeout = first_timeout if idx == 0 else fallback_timeout
+            try:
+                # E5：按 host 决定严格/宽松 SSL
+                try:
+                    parsed = urllib.parse.urlparse(url)
+                    host = (parsed.hostname or "").lower()
+                except Exception:
+                    host = ""
+                ctx = _make_ssl_context(host)
+
+                url = _encode_url(url)
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": "HuChong-Updater",
+                })
+                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+                    total = int(r.headers.get("Content-Length", 0))
+                    downloaded = 0
+                    chunk = 64 * 1024
+                    with open(tmp, "wb") as f:
+                        while True:
+                            if self._cancel:
+                                _log_update("DOWNLOAD", "INFO",
+                                            f"canceled during download url={url}")
+                                self.done_signal.emit(False, "canceled")
+                                return
+                            data = r.read(chunk)
+                            if not data:
+                                break
+                            f.write(data)
+                            downloaded += len(data)
+                            if total > 0:
+                                pct = min(99, int(downloaded * 100 / total))
+                                self.progress_signal.emit(pct)
+
+                # 下载完成，先做 SHA256 校验再 emit（E2）
+                ok, err_code = self._verify_sha256(tmp, url, downloaded)
+                if not ok:
+                    # 校验失败：删除临时文件，不安装，尝试下一个 URL（fallback）
+                    # 理由：单个镜像被篡改不应中断整体 fallback；若所有源都失败
+                    #       才在循环外 emit。
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+                    # P1-1：仅当新错误码严重性 >= 已有时才覆盖（防 verify_error 掉成 network 之类，
+                    # 也防本轮 verify_error 覆盖前一轮 sha256_mismatch）
+                    if _more_severe(err_code, last_error):
+                        last_error = err_code
+                    # 仅 SHA256 不匹配才尝试下一个源；其他校验失败（如读不出哈希）也继续
+                    if err_code == "sha256_mismatch":
+                        _log_update("DOWNLOAD", "FAIL",
+                                    f"url={url} sha256_mismatch (will try next source)")
+                        continue
+                    # 其他校验异常：保守起见也 fallback
+                    _log_update("DOWNLOAD", "FAIL",
+                                f"url={url} verify_error={err_code} (will try next source)")
+                    continue
+
+                # 成功！进度满格 + emit 文件路径
                 self.progress_signal.emit(100)
+                _log_update("DOWNLOAD", "OK",
+                            f"url={url} size={downloaded}"
+                            + (f" sha256={self.expected_sha256[:12]}..."
+                               if self.expected_sha256 else " sha256=skipped"))
                 self.done_signal.emit(True, tmp)
+                return
+
+            except Exception as e:
+                # E3：记录每个 URL 的失败，但让 fallback 链继续（独立 try/except）
+                # P1-1：仅当 network >= 已有错误码时才覆盖（防止 sha256_mismatch 被掩盖）
+                if _more_severe("network", last_error):
+                    last_error = "network"
+                _log_update("DOWNLOAD", "FAIL",
+                            f"url={url} type={type(e).__name__} msg={e} "
+                            f"(will try next source)")
+                continue
+
+        # 所有 URL 都失败
+        _log_update("DOWNLOAD", "FAIL",
+                    f"all sources exhausted count={len(self.urls)} last_error={last_error}")
+        self.done_signal.emit(False, last_error or "network")
+
+    def _verify_sha256(self, tmp_path, url, size):
+        """E2：对下载好的临时文件做 SHA256 校验。
+        返回 (ok: bool, err_code: str)。
+          · expected_sha256 缺失 → (True, "skip")（向后兼容旧 schema，写 warn）
+          · 匹配 → (True, "ok")
+          · 不匹配 → (False, "sha256_mismatch")
+          · 计算过程异常 → (False, "verify_error:<type>")
+        """
+        if not self.expected_sha256:
+            # 旧 version.json 无 sha256 字段 → 跳过校验（向后兼容，Architect Plan 第 6 节 Trade-off 5）
+            _log_update("VERIFY", "WARN",
+                        f"sha256 missing, skip verification url={url} size={size}")
+            return True, "skip"
+
+        try:
+            actual = self._compute_sha256(tmp_path)
         except Exception as e:
-            self.done_signal.emit(False, "")
+            _log_update("VERIFY", "WARN",
+                        f"sha256 compute failed type={type(e).__name__} msg={e} url={url}")
+            return False, "verify_error:" + type(e).__name__
+
+        expected = self.expected_sha256.strip().lower()
+        if actual == expected:
+            return True, "ok"
+        # 不匹配：文件可能被篡改 / 网络丢包导致内容不一致
+        _log_update("VERIFY", "FAIL",
+                    f"sha256 mismatch url={url} expected={expected[:12]}... actual={actual[:12]}...")
+        return False, "sha256_mismatch"
+
+    @staticmethod
+    def _compute_sha256(path):
+        """流式计算大文件 SHA256（避免一次性读 80MB EXE 进内存）。"""
+        import hashlib
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            while True:
+                buf = f.read(64 * 1024)
+                if not buf:
+                    break
+                h.update(buf)
+        return h.hexdigest()
 
 
 # ===========================================================================
