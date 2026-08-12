@@ -58,7 +58,7 @@ from PyQt5.QtWidgets import (
 # ---------------------------------------------------------------------------
 # 版本与更新配置
 # ---------------------------------------------------------------------------
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 # 版本检查文件 URL（放在 GitHub raw，国内通常可读；你可改用自己的仓库）
 # 格式：https://raw.githubusercontent.com/用户名/仓库名/main/version.json
 VERSION_CHECK_URL = (
@@ -1364,6 +1364,11 @@ class PetWindow(QWidget):
         if getattr(self, "_pending_pos", None):
             self.move(*self._pending_pos)
             self._pending_pos = None
+            # v1.2.1：保存位置可能在已拔掉的副屏 / 改分辨率后落在屏外
+            # → 若几何中心不在任何现存屏内，回退到主屏居中（防止启动后看不见）
+            c = self.geometry().center()
+            if not any(s.geometry().contains(c) for s in QApplication.screens()):
+                self._center_on_screen()
         else:
             self._center_on_screen()
 
@@ -1512,9 +1517,15 @@ class PetWindow(QWidget):
         self._set_state(S_LOOK, random.uniform(3, 6))
 
     def _enter_peek(self):
-        """躲猫猫：躲到屏幕边缘，只露触角/头顶偷看。
+        """躲猫猫：躲到屏幕边缘，每隔几秒探头一次让用户能发现。
 
-        方向 bottom=从屏幕底部往上探头（露触角），left/right=从侧边露半边。
+        方向 bottom=从屏幕底部往上探头（露头肩），left/right=从侧边露半边。
+        v1.2.1 改进：
+          · 露出比例提高（bottom 5%→20%，side 30%→50%），避免用户看不见
+          · 进入前弹气泡提示「我去躲起来啦」，让用户知道桌宠去哪了
+          · 躲好后每隔 4-6 秒探头一下（露出更多）持续 0.8-1.2 秒再缩回，
+            让桌宠在边缘「有动静」，更容易被发现
+          · 用独立字段 _peek_stage 避免与 S_STAND 的 _peek_phase（float 相位）冲突
         """
         g = self._screen_geom()
         d = random.choice(["bottom", "bottom", "left", "right"])  # 底部更常出现
@@ -1523,27 +1534,35 @@ class PetWindow(QWidget):
         ww, wh = self.width(), self.height()
 
         if d == "bottom":
-            # 从屏幕底部探头：窗口大部分沉到任务栏下方，只露顶部触角
-            # 触角约占角色高度 6%，只露触角尖 ≈ 角色高度 5%
-            reveal_h = int(self._disp_h * 0.05)
-            # 窗口顶部留 reveal_h 在屏幕内，其余在屏幕外(下方)
-            target_x = max(g.left(), min(g.right() - ww, cur_x))
-            target_y = g.bottom() - reveal_h
-            self._peek_target_x = target_x
-            self._peek_target_y = target_y
+            # bottom：hide 状态露头肩（20%），show 状态露上半身（50%）
+            hide_reveal = int(self._disp_h * 0.20)
+            show_reveal = int(self._disp_h * 0.50)
+            hide_x = max(g.left(), min(g.right() - ww, cur_x))
+            hide_y = g.bottom() - hide_reveal
+            show_x = hide_x
+            show_y = g.bottom() - show_reveal
         else:
-            # 从左右侧露半边
-            reveal_w = int(self._disp_w * 0.30)
+            # left/right：hide 状态露半边（50%），show 状态露大半（75%）
+            hide_reveal = int(self._disp_w * 0.50)
+            show_reveal = int(self._disp_w * 0.75)
+            hide_y = max(g.top(), min(g.bottom() - wh, cur_y))
+            show_y = hide_y
             if d == "left":
-                target_x = g.left() - ww + reveal_w
+                hide_x = g.left() - ww + hide_reveal
+                show_x = g.left() - ww + show_reveal
             else:
-                target_x = g.right() - reveal_w
-            self._peek_target_x = target_x
-            self._peek_target_y = max(g.top(), min(g.bottom() - wh, cur_y))
+                hide_x = g.right() - hide_reveal
+                show_x = g.right() - show_reveal
 
+        # 隐藏位置 / 探头位置 / 当前目标（先滑到隐藏位）
+        self._peek_hide_tx, self._peek_hide_ty = hide_x, hide_y
+        self._peek_show_tx, self._peek_show_ty = show_x, show_y
+        self._peek_target_x, self._peek_target_y = hide_x, hide_y
         self._peek_origin_x = cur_x
         self._peek_origin_y = cur_y
-        self._peek_phase = "out"
+        # _peek_stage：阶段标识（与 S_STAND 的 _peek_phase float 字段隔离）
+        # "out" 滑到隐藏位 → "hide" 等待 → "show" 探头 → "hide" ...
+        self._peek_stage = "out"
         self._peek_timer = time.perf_counter()
         # 手动/闲置躲猫猫都不自动结束，直到用户点击或拖拽才退出
         self._set_state(S_PEEK, 0)
@@ -1551,6 +1570,9 @@ class PetWindow(QWidget):
             self._facing = 1
         elif d == "right":
             self._facing = -1
+        # 进入前提示，让用户知道桌宠去哪了（此时桌宠还在原位置，气泡可见）
+        if not self._quiet_mode:
+            self.bubble.show_text("我去躲起来啦～来找我哦！", 2000)
 
     def _enter_dance(self, loops=2):
         """开始跳逐帧舞蹈（仅当前皮肤拥有 dance 动画时有效）。"""
@@ -1962,16 +1984,46 @@ class PetWindow(QWidget):
             self.move(int(nx), int(ny))
 
     def _tick_peek(self, dt):
-        """躲猫猫：躲到边缘后偶尔探头张望（支持 X/Y 双向）。"""
+        """躲猫猫：滑到边缘后每隔几秒探头一下再缩回，让用户能发现。
+
+        阶段机：_peek_stage ∈ {"out", "hide", "show"}
+          out  → 初始滑向隐藏位
+          hide → 蹲在隐藏位 4-6 秒
+          show → 探出到 show 位 0.8-1.2 秒（露出更多）
+        各阶段共用 _peek_target_x/y（动态切换）。
+        """
+        now = time.perf_counter()
         target_x = getattr(self, "_peek_target_x", self.x())
         target_y = getattr(self, "_peek_target_y", self.y())
         cx, cy = self.x(), self.y()
-        # 第一阶段：快速滑到躲藏位置（直接到位，避免半路可见）
+        # 还在向当前 target 滑动（统一收敛，避免半路可见）
         if abs(cx - target_x) > 2 or abs(cy - target_y) > 2:
             k = min(1.0, dt * 6.0)   # 较快收敛
             nx = cx + (target_x - cx) * k
             ny = cy + (target_y - cy) * k
             self.move(int(nx), int(ny))
+            return
+
+        # 到达 target，按阶段决定下一步
+        stage = getattr(self, "_peek_stage", "out")
+        if stage == "out":
+            # 刚滑到隐藏位 → 进入 hide 阶段，4-6 秒后探头
+            self._peek_stage = "hide"
+            self._peek_timer = now + random.uniform(4.0, 6.0)
+        elif stage == "hide":
+            # 蹲够了 → 切到探头位置
+            if now >= self._peek_timer:
+                self._peek_stage = "show"
+                self._peek_target_x = self._peek_show_tx
+                self._peek_target_y = self._peek_show_ty
+                self._peek_timer = now + random.uniform(0.8, 1.2)
+        elif stage == "show":
+            # 探头够了 → 切回隐藏位置
+            if now >= self._peek_timer:
+                self._peek_stage = "hide"
+                self._peek_target_x = self._peek_hide_tx
+                self._peek_target_y = self._peek_hide_ty
+                self._peek_timer = now + random.uniform(4.0, 6.0)
 
     def _tick_sleep(self, dt):
         """睡觉：缓慢呼吸由 paint 合成，这里只在闲置结束时唤醒。"""
