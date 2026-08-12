@@ -1,12 +1,12 @@
 {
-  "version": "1.2.0",
+  "version": "1.2.1",
   "update_date": "2026-08-12",
-  "download_url": "https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.2.0/huchong.exe",
+  "download_url": "https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.2.1/huchong.exe",
   "download_urls": [
-    "https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.2.0/huchong.exe",
-    "https://gh-proxy.com/https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.2.0/huchong.exe",
-    "https://ghfast.top/https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.2.0/huchong.exe"
+    "https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.2.1/huchong.exe",
+    "https://gh-proxy.com/https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.2.1/huchong.exe",
+    "https://ghfast.top/https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.2.1/huchong.exe"
   ],
-  "sha256": "1330f713e075e9fb222de00b7873fe966d17faad714cd94d5ad0371ea0345a34",
-  "changelog": "番茄钟菜单点击快捷时长直接开始倒计时；血量/内力/心情衰减速率减半（养宠更轻松）；修复番茄钟启动后被误判中断的问题。"
+  "sha256": "e68d34074cd4e7daa5d3f62e009eda34aeb4f7718e9b6613943b0badab059baf",
+  "changelog": "修复躲猫猫看不见的问题：提高边缘露出比例（底部 5%→20%、侧边 30%→50%）、进入躲猫猫时气泡提示、躲好后每隔几秒探头一次让用户能发现；顺带修复启动位置可能在已拔掉的副屏上导致启动不见的问题。"
 }
