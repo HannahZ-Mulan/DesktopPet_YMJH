@@ -7,6 +7,6 @@
     "https://gh-proxy.com/https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.2.0/huchong.exe",
     "https://ghfast.top/https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.2.0/huchong.exe"
   ],
-  "sha256": "c77b9e871221a8175118eaf5951855777a0b1489b2f4bfd14d9135173e949575",
+  "sha256": "1330f713e075e9fb222de00b7873fe966d17faad714cd94d5ad0371ea0345a34",
   "changelog": "番茄钟菜单点击快捷时长直接开始倒计时；血量/内力/心情衰减速率减半（养宠更轻松）；修复番茄钟启动后被误判中断的问题。"
 }
