@@ -58,7 +58,7 @@ from PyQt5.QtWidgets import (
 # ---------------------------------------------------------------------------
 # 版本与更新配置
 # ---------------------------------------------------------------------------
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 # 版本检查文件 URL（放在 GitHub raw，国内通常可读；你可改用自己的仓库）
 # 格式：https://raw.githubusercontent.com/用户名/仓库名/main/version.json
 VERSION_CHECK_URL = (
@@ -671,7 +671,8 @@ HEALTH_ANIM_MAP = {"jump": ANIM_JUMP, "shake": ANIM_SHAKE, "pop": ANIM_POP}
 HEALTH_ANIM_LABELS = {"jump": "跳动", "shake": "抖动", "pop": "挥手"}
 
 # 状态衰减速率（每分钟下降量）
-DECAY_PER_MIN = {"hp": 0.2, "mp": 0.3, "mood": 0.8}
+# v1.2.0：整体减半，养宠更轻松（白天 100 血约 16.7h 才掉完）
+DECAY_PER_MIN = {"hp": 0.1, "mp": 0.15, "mood": 0.4}
 
 # ===========================================================================
 # 动态情感系统（阶段4）
@@ -2686,18 +2687,31 @@ class PetWindow(QWidget):
         reward = "神授丹" if mins <= 25 else "一滴醉"
         self.bubble.show_text(f"番茄钟设为 {mins} 分钟，完成得 1 {reward}～", 2000)
 
+    def _quick_start_pomodoro(self, mins):
+        """菜单快捷选项：设置时长并立即启动倒计时。
+
+        若番茄进行中，切换为新时长重启。
+        不调 _cancel_pomodoro（避免弹"取消"气泡），并避免 _start_pomodoro 被
+        'already active' 拦截——这里先把 _pomodoro_active 置 False 再启动。
+        """
+        mins = max(1, min(120, int(mins)))
+        self._pomodoro_active = False
+        self._pomodoro_end = 0.0
+        self._pomodoro_custom_min = mins
+        self._save_config()
+        self._start_pomodoro()   # 复用，弹"🍅 番茄钟开始！专注 X 分钟吧～"
+
     def _tick_pomodoro(self):
-        """每秒检查番茄钟状态（在 _sense 里调用）。"""
+        """每秒检查番茄钟状态（在 _sense 里调用）。
+
+        v1.2.0：移除「闲置超 120 秒自动中断」——读书/思考/看视频等无键鼠
+        活动会被误判，违背番茄钟作为计时器的契约。专注激励已由独立的
+        _tick_focus_reward（同窗口持续 10 分钟得神授丹）承担。
+        """
         if not self._pomodoro_active:
             return
         now = time.perf_counter()
         remaining = self._pomodoro_end - now
-        # 中断条件：闲置超 2 分钟（不专注）→ 中断不奖励
-        if idle_seconds() > 120:
-            self._pomodoro_active = False
-            if not self._quiet_mode:
-                self.bubble.show_random_smart(POMODORO_BREAK_TEXTS)
-            return
         # 完成：按时长决定奖励类型（≤25分钟→神授丹，>25分钟→一滴醉）
         if remaining <= 0:
             self._pomodoro_active = False
@@ -3040,7 +3054,7 @@ class PetWindow(QWidget):
             reward = "神授丹" if mins <= 25 else "一滴醉"
             mark = "✓ " if cur_mins == mins else "   "
             ma = QAction(f"{mark}{mins} 分钟 · 得 {reward}", self)
-            ma.triggered.connect(lambda _=False, m=mins: self._set_pomo_minutes(m))
+            ma.triggered.connect(lambda _=False, m=mins: self._quick_start_pomodoro(m))
             pomo_menu.addAction(ma)
         pomo_menu.addSeparator()
         # 自定义时长
