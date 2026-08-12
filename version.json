@@ -1,11 +1,11 @@
 {
   "version": "1.1.0",
   "update_date": "2026-08-11",
-  "download_url": "https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.1.0/糊宠.exe",
+  "download_url": "https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.1.0/huchong.exe",
   "download_urls": [
-    "https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.1.0/糊宠.exe",
-    "https://gh-proxy.com/https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.1.0/糊宠.exe",
-    "https://ghfast.top/https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.1.0/糊宠.exe"
+    "https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.1.0/huchong.exe",
+    "https://gh-proxy.com/https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.1.0/huchong.exe",
+    "https://ghfast.top/https://github.com/HannahZ-Mulan/DesktopPet_YMJH/releases/download/v1.1.0/huchong.exe"
   ],
   "sha256": "c77b9e871221a8175118eaf5951855777a0b1489b2f4bfd14d9135173e949575",
   "changelog": "更新链路加固：多源下载 fallback、SHA256 完整性校验、失败可观测日志、SSL 白名单、发布脚本化。"
