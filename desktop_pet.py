@@ -39,6 +39,7 @@ import ssl
 import subprocess
 import tempfile
 import shutil
+import winsound
 from ctypes import wintypes
 
 from PyQt5.QtCore import (
@@ -58,7 +59,7 @@ from PyQt5.QtWidgets import (
 # ---------------------------------------------------------------------------
 # 版本与更新配置
 # ---------------------------------------------------------------------------
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3.0"
 # 版本检查文件 URL（放在 GitHub raw，国内通常可读；你可改用自己的仓库）
 # 格式：https://raw.githubusercontent.com/用户名/仓库名/main/version.json
 VERSION_CHECK_URL = (
@@ -480,6 +481,19 @@ ANIM_PEEK = KeyAnim("探头", _kf(
     (0.70, 1.05, 1.02, 0, -4, 2),
     (1.00, 1.00, 1.00, 0, 0, 0),
 ), 600)
+
+# 庆祝脉冲：双次放大脉冲 + 微旋转抖动（番茄完成等达成事件专用，
+# 不进 INTERACT_ANIMS 点击轮换列表）
+ANIM_CELEBRATE = KeyAnim("庆祝脉冲", _kf(
+    (0.00, 1.00, 1.00, 0, 0, 0),
+    (0.08, 1.18, 0.92, 0, 3, -3),     # 压扁蓄力 + 微转
+    (0.22, 0.96, 1.22, 0, -8, 5),     # 拉伸弹起
+    (0.36, 1.25, 0.92, 0, 5, -6),     # 第一次放大脉冲
+    (0.50, 1.05, 1.12, 0, -5, 3),     # 回弹
+    (0.64, 1.18, 0.96, 0, 3, -4),     # 第二次脉冲（略小，衰减感）
+    (0.80, 1.02, 1.06, 0, -2, 1),
+    (1.00, 1.00, 1.00, 0, 0, 0),
+), 1800)
 
 INTERACT_ANIMS = [ANIM_JUMP, ANIM_SQUISH, ANIM_SHAKE, ANIM_POP]
 
@@ -2632,7 +2646,11 @@ class PetWindow(QWidget):
         self._save_config()
 
     def _add_item(self, item_id, count, reason_texts=None, **fmt):
-        """奖励指定物品（非随机）+ 气泡。用于番茄钟按时长绑定奖励类型。"""
+        """奖励指定物品（非随机）+ 气泡。用于番茄钟按时长绑定奖励类型。
+
+        v1.3.0：完成提示三通道——气泡延长到 8 秒（原 show_smart 按字数
+        只显约 3 秒，用户休息回来早错过了）+ 庆祝脉冲动画放大抖动。
+        """
         if item_id not in ITEMS:
             item_id = "shenshou_dan"
         self._inventory[item_id] = self._inventory.get(item_id, 0) + count
@@ -2643,8 +2661,8 @@ class PetWindow(QWidget):
             txt = random.choice(reason_texts)
             for k, v in fmt.items():
                 txt = txt.replace("{" + k + "}", str(v))
-            self.bubble.show_smart(txt)
-        self._play(ANIM_POP)
+            self.bubble.show_text(txt, 8000)
+        self._play(ANIM_CELEBRATE)
         self._save_config()
 
     def _tick_focus_reward(self, silent=False):
@@ -2772,6 +2790,13 @@ class PetWindow(QWidget):
                 reward_id = "shenshou_dan"    # 短番茄 → 补血（体力）
             else:
                 reward_id = "yidizui"          # 长番茄 → 补内力（脑力）
+            # v1.3.0：系统提示音（异步不阻塞）——番茄结束用户常在休息，
+            # 视觉提示够不着低头/离座场景，声音是第三通道；尊重安静模式
+            if not self._quiet_mode:
+                try:
+                    winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                except Exception:
+                    pass   # 无声卡等极端环境不影响主流程
             self._add_item(
                 reward_id, 1,
                 None if self._quiet_mode else POMODORO_DONE_TEXTS,
